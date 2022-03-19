@@ -7,11 +7,14 @@
 #include <DateTime.h>
 #include <Rect.h>
 #include <Form.h>
+//#include <Font.h>
 #include <WindowNew.h>
 #include <ScrDriverNew.h>
 #include <UIcommon.h>
 #include <SerialMgr.h>
 #include <HsExt.h>
+//#include <MathLib.h>
+// ^^ used temporarily for ceil
 #undef  serDefaultCTSTimeout
 // ^^^^^ in SerMgr.h this has a trailing semicolon!
 #define serDefaultCTSTimeout     (5*sysTicksPerSecond)
@@ -26,7 +29,8 @@
  *   Global Defines/Macros
  **********************************************************************/
 // Uncomment to generate test data by pressing 'D/L'
-//#define DUMMY_DOWNLOAD
+///#define DUMMY_DOWNLOAD
+
 
 #define HI(x)    ((x >> 4) & 0x0f)
 #define LO(x)    (x & 0x0f)
@@ -36,7 +40,7 @@
 #define MORE_DATA_FLAG    (unsigned char) 0xEF
 #define NO_DATA_FLAG      (unsigned char) 0xFF
 
-// YYYYMMDDHHmm\0
+// YYYYMMDDHHmm\0 
 #define  NATO_DATE_SIZE   15
 
 // DD/MM/YYYY HH:mm:ss\0 or MM/DD/YYYY HH:mm:ss\0
@@ -74,8 +78,9 @@ typedef enum
 { 
   text_view=0,
   graph_view=1,
+  raw_view=2,
   // add new views above & keep numbers correct
-  max_view=2 // not a real view!
+  max_view=3 // not a real view!
 } viewType;
  
 typedef enum 
@@ -568,6 +573,267 @@ static void drawText(FormPtr frm)
 }
 
 /***********************************************************************
+ * FUNCTION:    drawDepthGraph
+ *
+ * DESCRIPTION: Display Depth graphs for selected record
+ *
+ * PARAMETERS:  - time offset (mins) into log, 
+ *              - pointer to owner Form, 
+ *              - dive duration
+ *
+ * RETURNED:    -
+ *
+ **********************************************************************/
+static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
+{
+    int   i, j, tmp;
+    float currD1, currD2;
+    char  tStr[20];
+    
+    int   offset = (mins_offset * 18);
+
+    int   maxD = (HI(gRec.data[18]) * 100) + 
+                 (LO(gRec.data[18]) * 10) + 
+                 HI(gRec.data[19]);
+    
+    // depth (LHS) 'y' label and value range
+    if (gRec.data[4] == IMPERIAL_FLAG)
+    {
+        WinDrawChars("ft", 2, 5, 21);
+        StrPrintF(tStr, "%03d", maxD);
+        WinDrawChars(tStr, StrLen(tStr), 1, 115);
+    	WinDrawChars("000", 4, 1, 12);
+    }
+    else
+    {
+        WinDrawChars("m ", 2, 5, 21);
+        StrPrintF(tStr, "%02d.%d", maxD/10, maxD%10);
+        WinDrawChars(tStr, StrLen(tStr), 1, 115);
+    	WinDrawChars("00.0", 4, 1, 12);
+    }
+    WinDrawLine(4, 40, 14, 40);
+    
+    // time slice 'x' label
+    StrPrintF(tStr, "%d thru %d mins", mins_offset, mins_offset + 10);
+    WinDrawChars(tStr, StrLen(tStr), 20, 122);
+    
+    // Scale marks on 'y' axis at 10ft or 5m
+    for (i = 0; i <= maxD; i += (gRec.data[4] == IMPERIAL_FLAG)?10:50)
+        WinDrawLine( 18, 20 + (100 * i/maxD), 19, 20 + (100 * i/maxD));
+
+    
+    // Depth Profile (as % of max depth)
+    for (i = 0, j = 0; i < 120; i += 2, j += 3)
+    {   
+    	int last = 0;
+    	 	
+        if ((gRec.data[offset+32+j] == NO_DATA_FLAG) ||
+            (gRec.data[offset+32+j] == MORE_DATA_FLAG))
+            break;
+            
+        currD1 = (HI(gRec.data[offset+32+j]) * 100) +
+                 (LO(gRec.data[offset+32+j]) * 10) +
+                 HI(gRec.data[offset+33+j]);
+    
+        tmp = 20 + (int)(100 * currD1/maxD);
+        
+        switch(gPrefs.plotStyle)
+        {
+        	plot_line:
+        		if (i == 0)
+        			WinDrawLine(21 + i, tmp, 21 + i, tmp);
+        		else
+	        		WinDrawLine(21 + i - 1, last, 21 + i, tmp);
+        		break;
+        	plot_point:
+        	default:
+			    WinDrawLine(21 + i, tmp, 21 + i, tmp);
+		}
+	    last = tmp;
+	         
+        if ((gRec.data[offset+34+j] == NO_DATA_FLAG) ||
+            (gRec.data[offset+34+j] == MORE_DATA_FLAG))
+            break;
+        
+        currD2 = (LO(gRec.data[offset+33+j]) * 100) +
+                 (HI(gRec.data[offset+34+j]) * 10) +
+                 LO(gRec.data[offset+34+j]);
+        
+        tmp = 20 + (int)(100 * currD2/maxD);
+        switch(gPrefs.plotStyle)
+        {
+        	case plot_line:
+        		WinDrawLine(22 + i - 1, last, 22 + i, tmp);
+        		break;
+        	case plot_point:
+        	default:
+	    	    WinDrawLine(22 + i, tmp, 22 + i, tmp);
+	    }
+        last = tmp;
+    }
+    
+}
+
+
+/***********************************************************************
+ * FUNCTION:    drawTempGraph
+ *
+ * DESCRIPTION: Display Temp graphs for selected record
+ *
+ * PARAMETERS:  - time offset (mins) into log, 
+ *              - pointer to owner Form, 
+ *              - offset into log where temps could start
+ *
+ * RETURNED:    -
+ *
+ **********************************************************************/
+static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
+{
+	static int   datum[200];
+	char  tStr[20];
+    int   min_mark, max_mark, mark_interval;
+    int   min_temp, max_temp;
+    int   i, j;
+    int   sample_cnt, scaled;
+    float range, scale;
+	       
+    if (gRec.data[tempStart - 1] == NO_DATA_FLAG)
+    	return; // we have no temp info, so what else can we do?
+    		
+    if (gRec.data[4] == IMPERIAL_FLAG)
+    {
+    	min_temp = 104; // set MAX
+        max_temp = 23;  // set MIN
+    }
+    else
+    {
+       	min_temp = 400; // set MAX
+        max_temp = -50; // set MIN
+    }
+    // these will be resolved later    
+
+	// get all datapoints into an int array
+	// - this gives us max/min and makes time slices easier
+    for (i = 0, j = 0; i < 200; j += 3)
+    {
+        if (gRec.data[tempStart+j] == NO_DATA_FLAG)
+            break;
+        
+        datum[i] = (HI(gRec.data[tempStart+j]) * 100) +
+                   (LO(gRec.data[tempStart+j]) * 10) +
+                   HI(gRec.data[tempStart+j+1]);
+                   
+        if (datum[i] > max_temp)
+        	max_temp = datum[i];
+        if (datum[i] < min_temp)
+        	min_temp = datum[i];
+        	
+        i++;     
+                                
+        if (gRec.data[tempStart+j+2] == NO_DATA_FLAG) 
+            break;
+    
+        datum[i] = (LO(gRec.data[tempStart+j+1]) * 100) +
+                   (HI(gRec.data[tempStart+j+2]) * 10) +
+                   LO(gRec.data[tempStart+j+2]);   
+                    
+        if (datum[i] > max_temp)
+        	max_temp = datum[i];
+        if (datum[i] < min_temp)
+        	min_temp = datum[i];
+
+        i++;
+
+    }
+    sample_cnt = i;
+    
+    if (gRec.data[4] == IMPERIAL_FLAG)
+    {
+    	// Imperial 5 degree intervals
+		mark_interval = 5;
+    }
+    else
+    {
+    	// Metric 5 degree intervals
+		mark_interval = 50;
+    }
+    
+    /*
+    StrPrintF(tStr, 
+ 	          "%d -> %d : %d",
+	          min_temp,
+    	      max_temp,
+        	  tempStart);
+        	  
+  	FrmCustomAlert(DebugAlert, "Info.", tStr, NULL);
+  	*/
+  	
+	min_mark = ((min_temp - 1) / mark_interval) * mark_interval;
+	max_mark = ((max_temp / mark_interval) + 1) * mark_interval;
+
+    if (gRec.data[4] == IMPERIAL_FLAG)
+    {
+    	StrPrintF(tStr, "%cF", 0xaa);
+        WinDrawChars(tStr, 2, 145, 21);
+        
+        StrPrintF(tStr, "%03d", max_mark);
+        WinDrawChars(tStr, 3, 145, 12);
+        
+        StrPrintF(tStr, "%03d", min_mark);
+        WinDrawChars(tStr, 3, 145, 115);
+    }
+    else
+    {
+    	StrPrintF(tStr, "%cC", 0xaa);
+        WinDrawChars(tStr, 2, 145, 21);
+        
+        StrPrintF(tStr, "%02d", max_mark/10);
+        WinDrawChars(tStr, 2, 145, 12);
+        
+        StrPrintF(tStr, "%02d", min_mark/10);
+        WinDrawChars(tStr, 2, 145, 115);
+    }
+    WinDrawGrayLine(145, 40, 155, 40);
+
+    range = (float) max_mark - (float) min_mark;
+    scale = (100.0F / range);
+    
+    for (i = min_mark; i <= max_mark; i += mark_interval)
+    {
+        j = 120 - (int) (((float) i - (float) min_mark) * scale);
+        WinDrawLine( 140, j, 142, j);
+    } 
+    
+    /*
+    StrPrintF(tStr, 
+ 	          "%d -> %d : %d",
+	          min_mark,
+    	      max_mark,
+        	  mark_interval);
+  	FrmCustomAlert(DebugAlert, "Scale", tStr, NULL);	                	          
+  	*/
+    
+    for (i = (mins_offset / 5), j = 0; 
+         (j < sample_cnt) && (j < 10); 
+         j+=5, i++)
+    {
+        scaled = 120 - (int) (((float) datum[i] - (float) min_mark) * scale);
+                            
+    	if ((scaled <= 120) && (scaled >= 20))
+        	WinDrawGrayLine(21 + (j * 12), scaled, 79 + (j * 12), scaled);
+        else
+        {
+        	StrPrintF(tStr, 
+   	    	          "[%d] %d - %d",
+       		          j,
+       	    	      datum[i],
+       	        	  scaled);
+        	FrmCustomAlert(DebugAlert, "Bad Temp", tStr, NULL);	                	          
+        }    
+    }
+}
+
+/***********************************************************************
  * FUNCTION:    drawGraph
  *
  * DESCRIPTION: Display graphs for selected record
@@ -581,19 +847,9 @@ static void drawText(FormPtr frm)
  **********************************************************************/
 static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
 {
-    int   i, j, k, tmp;
-    int   currD1, currD2;
-    char  tStr[20];
-    
-    int   offset = (mins_offset * 18);
-
-    int   tempStart = BLOCK_SIZE + ((dive_time - 1) * 12);
-                        // dive time is ceil(dive mins)
-
-    int   maxD = (HI(gRec.data[18]) * 100) + 
-                 (LO(gRec.data[18]) * 10) + 
-                 HI(gRec.data[19]);
-    
+    int   tempStart;
+                        
+    // set up form
     WinSetPattern((unsigned short *) pattern);
     WinFillRectangle((RectangleType *) &viewArea, 0);
     
@@ -604,6 +860,24 @@ static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
     {
         WinDrawChars("No Data To Graph!", 17, 10, 35);
         return;
+    }
+   
+    // set tempStart to index 1st temp sample in data
+   	if (gPrefs.showTemp)
+   	{
+        tempStart = BLOCK_SIZE + (dive_time * 18) - 5; // 18 == 1/2 * 12
+                            // dive time is ceil(dive mins), so we start
+                            // tempStart a little way back for safety
+    
+    	while (tempStart < (gRec.blocks * BLOCK_SIZE))
+    	{
+    	    if (gRec.data[tempStart] == MORE_DATA_FLAG)
+    	    {
+    	    	tempStart++; // move beyond marker
+    	        break;
+    	    }
+    	    tempStart++;
+    	}
     }
     
     //{20, 20 -> +120, +100  // Plot Area ( y/x origin, width/height)
@@ -637,173 +911,75 @@ static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
     WinDrawLine(104, 121, 104, 119);
     WinDrawLine(116, 121, 116, 119);
     WinDrawLine(128, 121, 128, 119);
-    
-    // depth (LHS) 'y' label and value range
-    if (gRec.data[4] == IMPERIAL_FLAG)
-    {
-        WinDrawChars("ft", 2, 5, 21);
-        StrPrintF(tStr, "%d", maxD);
-    }
-    else
-    {
-        WinDrawChars("m ", 2, 5, 21);
-        StrPrintF(tStr, "%d.%d", maxD/10, maxD%10);
-    }
-    WinDrawChars(tStr, StrLen(tStr), 0, 115);
-    WinDrawChars("0", 1, 5, 12);
-    
-    // time slice 'x' label
-    StrPrintF(tStr, "%d thru %d mins", mins_offset, mins_offset + 10);
-    WinDrawChars(tStr, StrLen(tStr), 20, 122);
-    
-    // Scale marks on 'y' axis at 10ft or 5m
-    for (i = 0; i <= maxD; i += (gRec.data[4] == IMPERIAL_FLAG)?10:50)
-        WinDrawLine( 18, 20 + (100 * i/maxD), 19, 20 + (100 * i/maxD));
 
+	if ((tempStart < (gRec.blocks * BLOCK_SIZE)) && gPrefs.showTemp)
+		drawTempGraph(mins_offset, frm, tempStart);
+		
+	drawDepthGraph(mins_offset, frm, dive_time);
+}
+
+/***********************************************************************
+ * FUNCTION:    drawRaw
+ *
+ * DESCRIPTION: Display raw bytes for selected record
+ *
+ * PARAMETERS:  - block to draw
+ *              - pointer to owner Form, 
+ *              - dive duration
+ *
+ * RETURNED:    -
+ *
+ **********************************************************************/
+static void drawRaw(int block, FormPtr frm)
+{
+	char longHex[9];
+	char shortHex[3];
+	char head[28];
+	int i, j, k;
+	//fontID font;
+                        
+    // set up form
+    WinSetPattern((unsigned short *) pattern);
+    WinFillRectangle((RectangleType *) &viewArea, 0);
     
-    // Depth Profile (as % of max depth)
-    for (i = 0, j = 0; i < 120; i += 2, j += 3)
-    {   
-    	int last = 0;
-    	 	
-        if ((gRec.data[offset+32+j] == NO_DATA_FLAG) ||
-            (gRec.data[offset+32+j] == MORE_DATA_FLAG))
-            break;
-            
-        currD1 = (HI(gRec.data[offset+32+j]) * 100) +
-                 (LO(gRec.data[offset+32+j]) * 10) +
-                 HI(gRec.data[offset+33+j]);
+    FrmShowObject(frm, FrmGetObjectIndex(frm, ViewScrollLButton));
+    FrmShowObject(frm, FrmGetObjectIndex(frm, ViewScrollRButton));
     
-        tmp = 20 + (100 * currD1/maxD);
-        
-        switch(gPrefs.plotStyle)
-        {
-        	plot_line:
-        		if (i == 0)
-        			WinDrawLine(21 + i, tmp, 21 + i, tmp);
-        		else
-	        		WinDrawLine(21 + i - 1, last, 21 + i, tmp);
-        		break;
-        	plot_point:
-        	default:
-			    WinDrawLine(21 + i, tmp, 21 + i, tmp);
-		}
-	    last = tmp;
-	         
-        if ((gRec.data[offset+34+j] == NO_DATA_FLAG) ||
-            (gRec.data[offset+34+j] == MORE_DATA_FLAG))
-            break;
-        
-        currD2 = (LO(gRec.data[offset+33+j]) * 100) +
-                 (HI(gRec.data[offset+34+j]) * 10) +
-                 LO(gRec.data[offset+34+j]);
-        
-        tmp = 20 + (100 * currD2/maxD);
-        switch(gPrefs.plotStyle)
-        {
-        	case plot_line:
-        		WinDrawLine(22 + i - 1, last, 22 + i, tmp);
-        		break;
-        	case plot_point:
-        	default:
-	    	    WinDrawLine(22 + i, tmp, 22 + i, tmp);
+    StrPrintF(head, "Block # %d of %d", block+1, gRec.blocks);
+    WinDrawChars(head, StrLen(head), 20, 25);
+    //font = FntSetFont(????);
+    k = 35;
+    for (i = 0; i < BLOCK_SIZE; i+=8)
+    {
+    	for (j = 0; j < 8; j++)
+    	{
+    		StrPrintF(longHex, "%x", gRec.data[(block * BLOCK_SIZE)+i+j]);
+    		StrCopy(shortHex, &longHex[StrLen(longHex)-2]);
+    		WinDrawChars(shortHex, StrLen(shortHex), 25 + (j*15), k);
+    	}
+    	k+=10;
+    }
+
+    if (block+1 < gRec.blocks)
+    {
+        k+=5;
+        //FntSetFont(font);
+	    StrPrintF(head, "Block # %d", block+2);
+	    WinDrawChars(head, StrLen(head), 20, k);
+        //font = FntSetFont(????);
+	    k+=10;
+	    for (i = 0; i < BLOCK_SIZE; i+=8)
+	    {
+	    	for (j = 0; j < 8; j++)
+	    	{
+	    		StrPrintF(longHex, "%x", gRec.data[((block+1) * BLOCK_SIZE)+i+j]);
+	    		StrCopy(shortHex, &longHex[StrLen(longHex)-2]);
+		    	WinDrawChars(shortHex, StrLen(shortHex), 25 + (j*15), k);
+	    	}
+	    	k+=10;
 	    }
-        last = tmp;
     }
-    
-    // Temp Profile
-    // note that these are scaled over the supported range
-    if ((tempStart < (gRec.blocks * BLOCK_SIZE)) && gPrefs.showTemp)
-    {   
-        // might have temps - at least there's enough data
-        // walk through post depth samples to see
-        while ((gRec.data[tempStart] != NO_DATA_FLAG) && 
-               (gRec.data[tempStart] != MORE_DATA_FLAG))
-        {
-            tempStart++;
-        }
-            
-        if (gRec.data[tempStart] == MORE_DATA_FLAG)
-        { // we have temp info
-            int min_mark, max_mark, mark_interval;
-            int rangeT = 0;
-            int minT;
-        
-            tempStart++;
-        
-            // temp (RHS) 'y' label and value range
-            if (gRec.data[4] == IMPERIAL_FLAG)
-            {
-            	StrPrintF(tStr, "%cF", 0xaa);
-                minT = 23;
-                rangeT = 104 - minT;
-                WinDrawChars(tStr, 2, 145, 27);
-                WinDrawChars("100", 3, 145, 18);
-                WinDrawChars("25", 2, 145, 112);
-                min_mark = 25; 
-                max_mark = 100; 
-                mark_interval = 5;
-            }
-            else
-            {
-            	StrPrintF(tStr, "%cC", 0xaa);
-            	// tenths of degree
-                minT = -50; 
-                rangeT = 400 - minT;
-                WinDrawChars(tStr, 2, 145, 21);
-                WinDrawChars("40", 2, 145, 12);
-                WinDrawChars("-5", 2, 145, 115);
-                min_mark = -50; 
-                max_mark = 400; 
-                mark_interval = 50;
-            }
-            for (i = min_mark; i <= max_mark; i += mark_interval)
-            {
-                tmp = 120 - 
-                          (int) (((float) i - (float) minT) * 
-                                    ((float) 100 / (float) rangeT));
-                WinDrawGrayLine( 140, tmp, 142, tmp);
-            } 
-                      
-            for (i = 0, j = 0, k = 0; i < 120; j += 3)
-            {
-                if (gRec.data[i] == NO_DATA_FLAG)
-                    break;
-                
-                currD1 = (HI(gRec.data[tempStart+j]) * 100) +
-                         (LO(gRec.data[tempStart+j]) * 10) +
-                         HI(gRec.data[tempStart+j+1]);
-                        
-                tmp = 120 - 
-                          (int) (((float) currD1 - (float) minT) * 
-                                    ((float) 100 / (float) rangeT));
-                k++;
-                if (k >= mins_offset)
-                {
-                	WinDrawGrayLine(21 + i, tmp, 33 + i, tmp);
-                	i += 12;
-                }
-                        
-                if (gRec.data[tempStart+j+2] == NO_DATA_FLAG) 
-                    break;
-            
-                currD2 = (LO(gRec.data[tempStart+j+1]) * 100) +
-                         (HI(gRec.data[tempStart+j+2]) * 10) +
-                         LO(gRec.data[tempStart+j+2]);
-            
-                tmp = 120 - 
-                          (int) (((float) currD2 - (float) minT) * 
-                                    ((float) 100 / (float) rangeT));
-                k++;
-                if (k >= mins_offset)
-                {
-                	WinDrawGrayLine(21 + i, tmp, 33 + i, tmp);
-                	i += 12;
-                }
-            }
-        }
-        
-    }
+    //FntSetFont(font);
 }
 
 /***********************************************************************
@@ -857,7 +1033,7 @@ static Err AddRecord(void)
         DmWrite(recP2, 
                 0, 
                 &gRec, 
-                (gRec.blocks * BLOCK_SIZE));                                                           
+                ((gRec.blocks + 1) * BLOCK_SIZE));                                                           
 
         MemHandleUnlock(recHand);
         gRecCnt++;
@@ -870,13 +1046,13 @@ static Err AddRecord(void)
                               NULL);
         
     err = DmCloseDatabase(DB);
-    
+        
     return err;
 }
 
 #ifdef DUMMY_DOWNLOAD
 /***********************************************************************
- * FUNCTION:    GetLog
+ * FUNCTION:    GetDummyLog
  *
  * DESCRIPTION: Generates dummy data
  *
@@ -885,12 +1061,11 @@ static Err AddRecord(void)
  * RETURNED:    
  *
  **********************************************************************/
-static void GetLog(void)
+static void GetDummyLog(void)
 {
     ULong           now;
     DateTimeType    dt;
     DateTimePtr     dtPtr = &dt;
-    short           i;
 
     gRec.key[0]  = 0;
     gRec.blocks  = 0;
@@ -926,7 +1101,7 @@ static void GetLog(void)
     gRec.data[11] |= (char) (dtPtr->minute % 10);
     gRec.data[12] = (dtPtr->second / 10) << 4;
     gRec.data[12] |= (char) (dtPtr->second % 10);
-    gRec.blocks++;
+    gRec.blocks++; //1
     
     gRec.data[32]=0x18;
     gRec.data[33]=0x01;
@@ -960,7 +1135,7 @@ static void GetLog(void)
     gRec.data[61]=0x75;
     gRec.data[62]=0x17;
     gRec.data[63]=0x41;
-    gRec.blocks++;
+    gRec.blocks++; //2
 
     gRec.data[64]=0x71;
     gRec.data[65]=0x17;
@@ -994,31 +1169,89 @@ static void GetLog(void)
     gRec.data[93]=0x51;
     gRec.data[94]=0x54;
     gRec.data[95]=0x15;
-    gRec.blocks++;
+    gRec.blocks++; //3
     
-    for (i=96; i<159; i+=3) 
-    {                       
-        gRec.data[i]=0x31;  
-        gRec.data[i+1]=0x34;
-        gRec.data[i+2]=0x13;
-    }
-    gRec.data[158]=0xef;
-    gRec.blocks++;
-    gRec.blocks++;
+    gRec.data[96]=0x81;
+    gRec.data[97]=0x75;
+    gRec.data[98]=0x17;
+    gRec.data[99]=0x41;
+    gRec.data[100]=0x75;
+    gRec.data[101]=0x17;
+    gRec.data[102]=0x51;
+    gRec.data[103]=0x75;
+    gRec.data[104]=0x16;
+    gRec.data[105]=0x81;
+    gRec.data[106]=0x65;
+    gRec.data[107]=0x16;
+    gRec.data[108]=0x41;
+    gRec.data[109]=0x63;
+    gRec.data[110]=0x16;
+    gRec.data[111]=0x21;
+    gRec.data[112]=0x61;
+    gRec.data[113]=0x16;
+    gRec.data[114]=0x01;
+    gRec.data[115]=0x59;
+    gRec.data[116]=0x15;
+    gRec.data[117]=0x51;
+    gRec.data[118]=0x57;
+    gRec.data[119]=0x15;
+    gRec.data[120]=0x61;
+    gRec.data[121]=0x55;
+    gRec.data[122]=0x15;
+    gRec.data[123]=0x51;
+    gRec.data[124]=0x54;
+    gRec.data[125]=0x15;
+    gRec.data[126]=0x71;
+    gRec.data[127]=0x58;
+    gRec.blocks++; //4
     
-    gRec.data[159]=0x09;
-    gRec.data[160]=0x50;
-    gRec.data[161]=0x90;
-    gRec.data[162]=0x08;
-    gRec.data[163]=0x70;
-    gRec.data[164]=0x80;
-    gRec.data[165]=0x07;
-    gRec.data[166]=0x70;
-    gRec.data[167]=0x69;
-    gRec.data[168]=0x05;
-    gRec.data[169]=0x9f;
-    gRec.data[170]=0xff;
-    gRec.blocks++;
+    gRec.data[128]=0x18;
+    gRec.data[129]=0x01;
+    gRec.data[130]=0x81;
+    gRec.data[131]=0x17;
+    gRec.data[132]=0x81;
+    gRec.data[133]=0x85;
+    gRec.data[134]=0x18;
+    gRec.data[135]=0x51;
+    gRec.data[136]=0x85;
+    gRec.data[137]=0x18;
+    gRec.data[138]=0x51;
+    gRec.data[139]=0x85;
+    gRec.data[140]=0x18;
+    gRec.data[141]=0x51;
+    gRec.data[142]=0x85;
+    gRec.data[143]=0x18;
+    gRec.data[144]=0x41;
+    gRec.data[145]=0x83;
+    gRec.data[146]=0x18;
+    gRec.data[147]=0x21;
+    gRec.data[148]=0x81;
+    gRec.data[149]=0x18;
+    gRec.data[150]=0x01;
+    gRec.data[151]=0x79;
+    gRec.data[152]=0x17;
+    gRec.data[153]=0x81;
+    gRec.data[154]=0x77;
+    gRec.data[155]=0x17;
+    gRec.data[156]=0x61;
+    gRec.data[157]=0x75;
+    gRec.data[158]=0xff;
+    gRec.data[159]=0xef;
+    gRec.blocks++; // 5
+    
+    gRec.data[160]=0x09;
+    gRec.data[161]=0x50;
+    gRec.data[162]=0x90;
+    gRec.data[163]=0x08;
+    gRec.data[164]=0x70;
+    gRec.data[165]=0x80;
+    gRec.data[166]=0x07;
+    gRec.data[167]=0x70;
+    gRec.data[168]=0x69;
+    gRec.data[169]=0x05;
+    gRec.data[170]=0x9f;
+    gRec.data[171]=0xff;
+    gRec.blocks++; // 6
 
     StrPrintF(gRec.key, "%d%d%d%d%d%d%d%d%d%d%d%d%d%d", 
               HI(gRec.data[5]),
@@ -1039,7 +1272,7 @@ static void GetLog(void)
     (void) AddRecord();
 
 }
-#else
+#endif
 
 /***********************************************************************
  * FUNCTION:    fixLog
@@ -1080,7 +1313,8 @@ static void fixLog()
                		   (HI(gRec.data[34+j]) * 10) +
                 	   LO(gRec.data[34+j]);
                    
-            ave = (int) (((float) (last + next) / (float) 2) + 0.5);
+            //ave = (int) (((float) (last + next) / 2.0F) + 0.5F);
+            ave = (last + next) / 2;
             
             gRec.data[32+j] = (unsigned char) 
             					(((ave / 100) << 4) | ((ave % 100) / 10));
@@ -1109,7 +1343,8 @@ static void fixLog()
     	        	   (LO(gRec.data[35+j]) * 10) +
         	    	   HI(gRec.data[36+j]);
                
-            ave = (int) (((float) (last + next) / (float) 2) + 0.5);
+            //ave = (int) (((float) (last + next) / 2.0F) + 0.5F);
+            ave = (last + next) / 2;
                
             gRec.data[33+j] = (unsigned char) 
             					((HI(gRec.data[33+j]) << 4) | (ave / 100));
@@ -1120,6 +1355,7 @@ static void fixLog()
         last = curr;
     }
 }
+
 /***********************************************************************
  * FUNCTION:    GetLog
  *
@@ -1132,13 +1368,18 @@ static void fixLog()
  **********************************************************************/
 static void GetLog(void)
 {
-
     SerSettingsType serialSettings;
     UInt            serialPort;
     ULong           got; 
     Err             err;
-    Byte            ack[1] = { 0xF0 };
+    static Byte     ack[1] = { 0xFF };
     DWord           value;
+    Byte            holding[BLOCK_SIZE];
+
+#ifdef DUMMY_DOWNLOAD
+    GetDummyLog();
+    return;
+#endif
 
     gRec.key[0]  = 0;
     gRec.blocks  = 0;
@@ -1162,7 +1403,7 @@ static void GetLog(void)
                        "Cannot open Serial Library.", NULL, NULL);
         return;
     }
-        
+    
     err = SerOpen(serialPort, serPortDefault, 4800L); // 8N1
     if (err)
     {
@@ -1185,7 +1426,7 @@ static void GetLog(void)
     
     serialSettings.baudRate = 4800L;
     serialSettings.flags = serSettingsFlagBitsPerChar8 |
-                             serSettingsFlagStopBits1;
+                             serSettingsFlagStopBits1; // no parity
     serialSettings.ctsTimeout = serDefaultCTSTimeout;
        
     err = SerSetSettings(serialPort,&serialSettings); 
@@ -1207,35 +1448,36 @@ static void GetLog(void)
         return; // shortcut on cancel
     }
             
+    SerSend(serialPort, ack, 1, &err); 
+    if (!err)
+        err = SerSendWait(serialPort, -1);            
+    if (err)
+    {
+        SerClose(serialPort);
+        if (err == serErrTimeOut)
+                FrmCustomAlert(SerialPortErrorAlert, 
+                              "Send Timeout. "
+                                "Check watch is in Transmit mode.", 
+                              NULL, 
+                              NULL);
+        else
+                FrmCustomAlert(SerialPortErrorAlert, 
+                              "Undefined Send Error", 
+                              NULL, 
+                              NULL);
+        return;
+    }
+        
     // download data
     do
-    {
-        SerSend(serialPort, ack, 1, &err); 
-        if (!err)
-            err = SerSendWait(serialPort, -1);
-            
-        if (err)
-        {
-            SerClose(serialPort);
-            if (err == serErrTimeOut)
-                    FrmCustomAlert(SerialPortErrorAlert, 
-                                  "Send Timeout. "
-                                    "Check watch is in Transmit mode.", 
-                                  NULL, 
-                                  NULL);
-            else
-                    FrmCustomAlert(SerialPortErrorAlert, 
-                                  "Undefined Send Error", 
-                                  NULL, 
-                                  NULL);
-            return;
-        }
-        
+    {        
         got = SerReceive(serialPort, 
-                         &(gRec.data[(gRec.blocks * BLOCK_SIZE)]), 
+                         holding, 
                          BLOCK_SIZE, 
                          RxByteTimeout,  // 0 = no timeout
                          &err);
+        MemMove(&(gRec.data[(gRec.blocks * BLOCK_SIZE)]), holding, BLOCK_SIZE);
+        gRec.blocks++;
         if (err)
         {
             SerClose(serialPort);
@@ -1260,6 +1502,26 @@ static void GetLog(void)
             return;
         }
         
+        SerSend(serialPort, ack, 1, &err); 
+        if (!err)
+            err = SerSendWait(serialPort, -1);            
+        if (err)
+        {
+            SerClose(serialPort);
+            if (err == serErrTimeOut)
+                    FrmCustomAlert(SerialPortErrorAlert, 
+                                  "Send Timeout. "
+                                    "Check watch is in Transmit mode.", 
+                                  NULL, 
+                                  NULL);
+            else
+                    FrmCustomAlert(SerialPortErrorAlert, 
+                                  "Undefined Send Error", 
+                                  NULL, 
+                                  NULL);
+            return;
+        }
+        
         if (got != BLOCK_SIZE)
         {
         	SerClose(serialPort);
@@ -1269,7 +1531,6 @@ static void GetLog(void)
                            NULL);                    
             return;
         }
-        gRec.blocks++;
         
         EvtResetAutoOffTimer();
         
@@ -1309,7 +1570,6 @@ static void GetLog(void)
         err = AddRecord();
     }
 }
-#endif
 
 /***********************************************************************
  * FUNCTION:    OptionsFormHandleEvent
@@ -1635,17 +1895,21 @@ static Boolean MainFormHandleEvent(EventPtr eventP)
  *
  * DESCRIPTION: Calls appropriate view display function
  *
- * PARAMETERS:  time offset, form, duration of dive
+ * PARAMETERS:  time offset, form, duration of dive, data block
  *
  * RETURNED:    -
  *
  **********************************************************************/
-static void drawView(int offset, FormPtr frmP, int diveTime)
+static void drawView(int offset, FormPtr frmP, int diveTime, int block)
 {
     switch (gPrefs.view)
     {
         case text_view:
             drawText(frmP);
+            break;
+            
+        case raw_view:
+            drawRaw(block, frmP);
             break;
     
         case graph_view:
@@ -1674,6 +1938,7 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
     static Word    selection;
     static CharPtr keyP = NULL;
     static int     offset = 0;
+    static int     block = 0;
     LogRecPtr      recP;
     Handle         recHand;
     DmOpenRef      DB;
@@ -1690,7 +1955,7 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
                     gPrefs.view = (viewType) 
                                       (((int) gPrefs.view + 1) % 
                                           max_view);
-                    drawView(offset, frmP, diveTime);
+                    drawView(offset, frmP, diveTime, block);
                     handled = true;
                     break;
                     
@@ -1702,16 +1967,34 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
 
                 case ViewScrollRButton :
                 	handled = true;
-                    if ((offset+5) < (diveTime-5))
-                        offset += 5;
-                    drawGraph(offset, frmP, diveTime);
+                	if (gPrefs.view == graph_view)
+                	{
+                    	if ((offset+5) < (diveTime-5))
+                        	offset += 5;
+	                    drawGraph(offset, frmP, diveTime);
+	                }
+	                else // raw view
+	                {
+                    	if ((block+1) < (gRec.blocks))
+                        	block++;
+	                    drawRaw(block, frmP);
+	                }
                     break;
                     
                 case ViewScrollLButton :
                 	handled = true;
-                    if (offset > 0)
-                        offset -= 5;
-                    drawGraph(offset, frmP, diveTime);
+                	if (gPrefs.view == graph_view)
+                	{
+                    	if (offset > 0)
+                        	offset -= 5;
+                    	drawGraph(offset, frmP, diveTime);
+                    }
+                    else
+                    {
+                    	if (block > 0)
+                    		block--;
+                    	drawRaw(block, frmP);
+                    }
                     break;
 
                 default:
@@ -1769,7 +2052,7 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
             diveTime = ((gRec.data[22] & 0x0f) * 100) +
                        (((gRec.data[23] >> 4) & 0x0f) * 10) +
                        (gRec.data[23] & 0x0f);
-            drawView(offset, frmP, diveTime);
+            drawView(offset, frmP, diveTime, block);
             break;
 
         default:
@@ -1959,6 +2242,13 @@ static Err AppStart(void)
         gPrefs.showMins = 1;
     }
     
+    //error = SysLibFind(MathLibName, &MathLibRef);
+    //if (error)
+    //    error = SysLibLoad(LibType, MathLibCreator, &MathLibRef);
+    //ErrFatalDisplayIf(error, "Can't find MathLib"); // Just an example; handle it gracefully
+    //error = MathLibOpen(MathLibRef, MathLibVersion);
+    //ErrFatalDisplayIf(error, "Can't open MathLib");   
+    
     return error;
 }
 
@@ -1976,6 +2266,9 @@ static Err AppStart(void)
  **********************************************************************/
 static void AppStop(void)
 {
+    //UInt usecount;
+    //Err error;
+    
     // Write the saved preferences / saved-state information.  This data
     // will be backed up during a HotSync.
     PrefSetAppPreferences (appFileCreator, appPrefID, appPrefVersionNum,
@@ -1986,7 +2279,12 @@ static void AppStop(void)
         MemHandleUnlock(gStringArrayH);
     }
     
-        ScrDisplayMode (scrDisplayModeSetToDefaults, NULL, NULL, NULL, NULL);
+    ScrDisplayMode (scrDisplayModeSetToDefaults, NULL, NULL, NULL, NULL);
+    
+    //error = MathLibClose(MathLibRef, &usecount);
+    //ErrFatalDisplayIf(error, "Can't close MathLib");
+    //if (usecount == 0)
+    //    SysLibRemove(MathLibRef); 
 }
 
 /***********************************************************************
