@@ -1,0 +1,9 @@
+This is a stationery project for a C++ application that runs on
+a Palm OS device.  This is not a very complicated example, but 
+Metrowerks C++ support for Palm OS covers all C++ language
+features.  You can use zero-overhead exceptions, templates,
+RTII, etc., but there is no standard library support for C++
+on Palm OS devices at this time.
+
+Metrowerks Corp
+25 July 1998
