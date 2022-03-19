@@ -1,0 +1,12 @@
+CodeWarrior for Palm OS Release 5
+Project Stationery
+July 1998
+===================================
+
+Please feel free to send us any suggestions, complaints, bug reports, and gripes.
+Fill out the bug report form, located in the release notes folder, and email
+it to:
+
+codewarrior@palm.com
+
+===================================
