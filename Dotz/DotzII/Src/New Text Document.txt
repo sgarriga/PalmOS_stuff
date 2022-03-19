@@ -1,0 +1,609 @@
+/******************************************************************************
+ *
+ * Copyright 2001 Stephen Garriga
+ * All rights reserved.
+ *
+ * File: DotzII.c
+ *
+ *****************************************************************************/
+
+#include <PalmOS.h>
+#include "DotzRsc.h"
+
+
+//     #define DO_NOT_ALLOW_ACCESS_TO_INTERNALS_OF_STRUCTS
+
+// enums for flags
+typedef enum player {one_player = 128, two_player = 0} player_t;
+typedef enum colors {r_g = 56,
+                     r_b = 48,
+                     g_r = 40,
+                     g_b = 32,
+                     b_r = 24,
+                     b_g = 16,
+                     d_l = 8,
+                     l_d = 0} colors_t;
+typedef enum scrn_sz {szMask = 6,
+                      szScr1 = 6,
+                      szScr2 = 4,
+                      szScr3 = 2,
+                      szScr4 = 0} screen_size_t;
+typedef enum palate {monochrome = 0, color = 2} palate_t;
+typedef enum who_up {player_one_up = 0, player_two_up = 1} who_up_t;
+
+// enums for square state
+typedef enum side {LRTB_taken = 15,
+                   L_taken = 8,
+                   R_taken = 4,
+                   T_taken = 2,
+                   B_taken = 1} side_taken_t;
+typedef enum who_got {player_one_got = 16, player_two_got = 32} who_got_t;              
+
+#define MAX_X   24
+#define MAX_Y   24
+
+typedef struct {
+    char    name[80];
+    long    points;
+} hiEntry_t;
+
+typedef struct {
+    unsigned char  board[MAX_X][MAX_Y];
+    hiEntry_t      score[10];
+    unsigned char  flags;
+} prefs_t;
+
+// *****************************************************************
+
+prefs_t prefs;
+
+// *****************************************************************
+
+
+/***********************************************************************
+ *
+ *   Entry Points
+ *
+ ***********************************************************************/
+
+
+/***********************************************************************
+ *
+ *   Internal Constants
+ *
+ ***********************************************************************/
+#define appFileCreator			  'SGDz'
+#define appVersionNum              0x01
+#define appPrefID                  0x00
+#define appPrefVersionNum          0x01
+
+// Define the minimum OS version we support (3.5 for now).
+#define ourMinVersion	sysMakeROMVersion(3,5,0,sysROMStageRelease,0)
+
+
+/***********************************************************************
+ *
+ *   Internal Functions
+ *
+ ***********************************************************************/
+static int sizeX()
+{
+    switch (prefs.flags & (unsigned char) szMask)
+    {
+        case szScr1 : return MAX_X;
+        case szScr2 : return MAX_X/2;
+        case szScr3 : return MAX_X/4;
+        case szScr4 : return MAX_X/8;
+        default : return -1;
+    }
+}
+
+static int sizeY()
+{
+    switch (prefs.flags & (unsigned char) szMask)
+    {
+        case szScr1 : return MAX_Y;
+        case szScr2 : return MAX_Y/2;
+        case szScr3 : return MAX_Y/4;
+        case szScr4 : return MAX_Y/8;
+        default : return -1;
+    }
+}
+
+static int turns_left()
+{
+    int x, y;
+    int free_squares = 0;
+
+    for (x = 0; x < sizeX(); x++)
+        for (y = 0; y < sizeY(); y++)
+            if ((prefs.board[x][y] & (unsigned char) LRTB_taken) != LRTB_taken)
+                free_squares++;
+
+    return free_squares;
+}
+
+static char sidesFree(unsigned char square)
+{
+    char sf = 0;
+    if ((square & (unsigned char) LRTB_taken) == LRTB_taken)
+        return sf;
+        
+    if ((square & (unsigned char) L_taken) != L_taken)
+        sf++;
+        
+    if ((square & (unsigned char) T_taken) != T_taken)
+        sf++;
+        
+    if ((square & (unsigned char) R_taken) != R_taken)
+        sf++;
+        
+    if ((square & (unsigned char) B_taken) != B_taken)
+        sf++;
+        
+    return sf;
+}
+
+static int getP0go(int *go_x, int *go_y)
+{
+    int x, y, i, j = 0;
+    Boolean  found[4] = {false, false, false, false};
+    int  foundX[4], foundY[4];
+
+    // Move Types
+    // 1st pref. 3 sides filled - scores
+    // 2nd pref. 0 sides filled - safest
+    // 3rd pref. 1 side filled  - safe
+    // Finally   2 sides filled - yields points
+
+    // find the 1st (if any) of each Move Type
+    for (x = 0; (x < sizeX()) && (j < 4); x++)
+        for (y = 0; (y < sizeY()) && (j < 4); y++)
+            for (i = 0; (i < 4) && (j < 4); i++)
+                if (!found[i] && (sidesFree(prefs.board[x][y]) == i))
+                {
+                    found[i] = true;
+                    foundX[i] = x;
+                    foundY[i] = y;
+                    j++;
+                }
+
+    // return the preferred move
+    if (j > 0)      // j > 0 means a move was possible
+    {
+        if (found[3])
+        {
+            *go_x = foundX[3];
+            *go_y = foundY[3];
+        }
+        else if (found[0])
+        {
+            *go_x = foundX[0];
+            *go_y = foundY[0];
+        }
+        else if (found[1])
+        {
+            *go_x = foundX[1];
+            *go_y = foundY[1];
+        }
+        else // found(2) MUST be true here
+        {
+            *go_x = foundX[2];
+            *go_y = foundY[2];
+        }
+        return 0;
+    }
+
+    // if we're still here, it's an error
+    return -1;
+}
+
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    RomVersionCompatible
+ *
+ * DESCRIPTION: This routine checks that a ROM version is meet your
+ *              minimum requirement.
+ *
+ * PARAMETERS:  requiredVersion - minimum rom version required
+ *                                (see sysFtrNumROMVersion in SystemMgr.h 
+ *                                for format)
+ *              launchFlags     - flags that indicate if the application 
+ *                                UI is initialized.
+ *
+ * RETURNED:    error code or zero if rom is compatible
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Err RomVersionCompatible(UInt32 requiredVersion, UInt16 launchFlags)
+{
+	UInt32 romVersion;
+
+	// See if we're on in minimum required version of the ROM or later.
+	FtrGet(sysFtrCreator, sysFtrNumROMVersion, &romVersion);
+	if (romVersion < requiredVersion)
+		{
+		if ((launchFlags & (sysAppLaunchFlagNewGlobals | sysAppLaunchFlagUIApp)) ==
+			(sysAppLaunchFlagNewGlobals | sysAppLaunchFlagUIApp))
+			{
+			FrmAlert (RomIncompatibleAlert);
+		
+			// Palm OS 1.0 will continuously relaunch this app unless we switch to 
+			// another safe one.
+			if (romVersion < ourMinVersion)
+				{
+				AppLaunchWithCommand(sysFileCDefaultApp, sysAppLaunchCmdNormalLaunch, NULL);
+				}
+			}
+		
+		return sysErrRomIncompatible;
+		}
+
+	return errNone;
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    DisplayCompatible
+ *
+ * DESCRIPTION: This routine checks that a display meets minimum requirement.
+ *
+ * PARAMETERS:  
+ *
+ * RETURNED:    error code or zero if display is compatible
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Err DisplayCompatible()
+{
+    UInt32 color_bits = 0;
+
+	// See if we're on in minimum required version of the ROM or later.
+	FtrGet(sysFtrCreator, sysFtrNumDisplayDepth, &color_bits);
+	if (color_bits < 2)
+	{
+		FrmAlert (DisplayIncompatibleAlert);
+    	return sysErrRomIncompatible;
+	}
+
+	return errNone;
+}
+/***********************************************************************
+ *
+ * FUNCTION:    GetObjectPtr
+ *
+ * DESCRIPTION: This routine returns a pointer to an object in the current
+ *              form.
+ *
+ * PARAMETERS:  formId - id of the form to display
+ *
+ * RETURNED:    void *
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static void * GetObjectPtr(UInt16 objectID)
+{
+	FormPtr frmP;
+
+	frmP = FrmGetActiveForm();
+	return FrmGetObjectPtr(frmP, FrmGetObjectIndex(frmP, objectID));
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    MainFormInit
+ *
+ * DESCRIPTION: This routine initializes the MainForm form.
+ *
+ * PARAMETERS:  frm - pointer to the MainForm form.
+ *
+ * RETURNED:    nothing
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static void MainFormInit(FormPtr /*frmP*/)
+{
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    MainFormDoCommand
+ *
+ * DESCRIPTION: This routine performs the menu command specified.
+ *
+ * PARAMETERS:  command  - menu item id
+ *
+ * RETURNED:    nothing
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Boolean  MainFormDoCommand(UInt16 command)
+{
+	Boolean  handled = false;
+   FormPtr frmP;
+
+	switch (command)
+		{
+		case MainOptionsAboutStarterApp:
+			MenuEraseStatus(0);					// Clear the menu status from the display.
+			frmP = FrmInitForm (AboutForm);
+			FrmDoDialog (frmP);					// Display the About Box.
+			FrmDeleteForm (frmP);
+			handled = true;
+			break;
+
+		}
+	
+	return handled;
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    MainFormHandleEvent
+ *
+ * DESCRIPTION: This routine is the event handler for the 
+ *              "MainForm" of this application.
+ *
+ * PARAMETERS:  eventP  - a pointer to an EventType structure
+ *
+ * RETURNED:    true if the event has handle and should not be passed
+ *              to a higher level handler.
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Boolean  MainFormHandleEvent(EventPtr eventP)
+{
+   Boolean  handled = false;
+   FormPtr frmP;
+
+	switch (eventP->eType) 
+		{
+		case menuEvent:
+			return MainFormDoCommand(eventP->data.menu.itemID);
+
+		case frmOpenEvent:
+			frmP = FrmGetActiveForm();
+			MainFormInit( frmP);
+			FrmDrawForm ( frmP);
+			handled = true;
+			break;
+
+		default:
+			break;
+		
+		}
+	
+	return handled;
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    AppHandleEvent
+ *
+ * DESCRIPTION: This routine loads form resources and set the event
+ *              handler for the form loaded.
+ *
+ * PARAMETERS:  event  - a pointer to an EventType structure
+ *
+ * RETURNED:    true if the event has handle and should not be passed
+ *              to a higher level handler.
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Boolean  AppHandleEvent(EventPtr eventP)
+{
+	UInt16 formId;
+	FormPtr frmP;
+
+	if (eventP->eType == frmLoadEvent)
+		{
+		// Load the form resource.
+		formId = eventP->data.frmLoad.formID;
+		frmP = FrmInitForm(formId);
+		FrmSetActiveForm(frmP);
+
+		// Set the event handler for the form.  The handler of the currently
+		// active form is called by FrmHandleEvent each time is receives an
+		// event.
+		switch (formId)
+			{
+			case MainForm:
+				FrmSetEventHandler(frmP, MainFormHandleEvent);
+				break;
+
+			default:
+//				ErrFatalDisplay("Invalid Form Load Event");
+				break;
+
+			}
+		return true;
+		}
+	
+	return false;
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    AppEventLoop
+ *
+ * DESCRIPTION: This routine is the event loop for the application.  
+ *
+ * PARAMETERS:  nothing
+ *
+ * RETURNED:    nothing
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static void AppEventLoop(void)
+{
+	UInt16 error;
+	EventType event;
+
+	do {
+		EvtGetEvent(&event, evtWaitForever);
+
+		if (! SysHandleEvent(&event))
+			if (! MenuHandleEvent(0, &event, &error))
+				if (! AppHandleEvent(&event))
+					FrmDispatchEvent(&event);
+
+	} while (event.eType != appStopEvent);
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:     AppStart
+ *
+ * DESCRIPTION:  Get the current application's preferences.
+ *
+ * PARAMETERS:   nothing
+ *
+ * RETURNED:     Err value 0 if nothing went wrong
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Err AppStart(void)
+{
+    UInt16 prefsSize;
+
+	// Read the saved preferences / saved-state information.
+	if (PrefGetAppPreferences(appFileCreator, appPrefID, &prefs, &prefsSize, true) == 
+		noPreferenceFound)
+	{
+        UInt32 color_bits = 0;
+        
+	    // 1st run, default the prefs
+	    MemSet(&prefs, 0, sizeof(prefs));
+	    
+	    // setup for b/w or color
+    	FtrGet(sysFtrCreator, sysFtrNumDisplayDepth, &color_bits);
+	    if (color_bits == 2)
+	        prefs.flags = one_player | l_d | szScr1 | monochrome | player_one_up;
+	    else
+	        prefs.flags = one_player | r_g | szScr1 | color      | player_one_up;
+
+	}
+	
+   return errNone;
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    AppStop
+ *
+ * DESCRIPTION: Save the current state of the application.
+ *
+ * PARAMETERS:  nothing
+ *
+ * RETURNED:    nothing
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static void AppStop(void)
+{
+	// Write the saved preferences / saved-state information.  This data 
+	// will be backed up during a HotSync.
+	PrefSetAppPreferences (appFileCreator, appPrefID, appPrefVersionNum, 
+		&prefs, sizeof (prefs), true);
+		
+	// Close all the open forms.
+	FrmCloseAllForms ();
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    StarterPalmMain
+ *
+ * DESCRIPTION: This is the main entry point for the application.
+ *
+ * PARAMETERS:  cmd - word value specifying the launch code. 
+ *              cmdPB - pointer to a structure that is associated with the launch code. 
+ *              launchFlags -  word value providing extra information about the launch.
+ *
+ * RETURNED:    Result of launch
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static UInt32 StarterPalmMain(UInt16 cmd, MemPtr /*cmdPBP*/, UInt16 launchFlags)
+{
+	Err error;
+
+	error = RomVersionCompatible (ourMinVersion, launchFlags);
+	if (error) return (error);
+	error = DisplayCompatible ();
+	if (error) return (error);
+
+	switch (cmd)
+		{
+		case sysAppLaunchCmdNormalLaunch:
+			error = AppStart();
+			if (error) 
+				return error;
+				
+			FrmGotoForm(MainForm);
+			AppEventLoop();
+			AppStop();
+			break;
+
+		default:
+			break;
+
+		}
+	
+	return errNone;
+}
+
+
+/***********************************************************************
+ *
+ * FUNCTION:    PilotMain
+ *
+ * DESCRIPTION: This is the main entry point for the application.
+ *
+ * PARAMETERS:  cmd - word value specifying the launch code. 
+ *              cmdPB - pointer to a structure that is associated with the launch code. 
+ *              launchFlags -  word value providing extra information about the launch.
+ * RETURNED:    Result of launch
+ *
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+UInt32 PilotMain( UInt16 cmd, MemPtr cmdPBP, UInt16 launchFlags)
+{
+    return StarterPalmMain(cmd, cmdPBP, launchFlags);
+}
+
