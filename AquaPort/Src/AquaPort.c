@@ -1,44 +1,39 @@
 // AquaPort : Copyright (c) 2001, Stephen Garriga.  
 // All rights reserved.
+// Revised for PalmOS 3.5
  
-#include <Pilot.h>
+#include <PalmOS.h>
+#include <PalmCompatibility.h>
 #include <SysEvtMgr.h>
 #include <FeatureMgr.h>
 #include <DateTime.h>
 #include <Rect.h>
 #include <Form.h>
 //#include <Font.h>
-#include <WindowNew.h>
-#include <ScrDriverNew.h>
-#include <UIcommon.h>
-#include <SerialMgr.h>
+#include <Window.h>
+#include <SerialMgrOld.h>
 #include <HsExt.h>
-//#include <MathLib.h>
-// ^^ used temporarily for ceil
-#undef  serDefaultCTSTimeout
-// ^^^^^ in SerMgr.h this has a trailing semicolon!
-#define serDefaultCTSTimeout     (5*sysTicksPerSecond)
-
-//typedef unsigned char	Boolean;
 
 #define RxByteTimeout            300
 
 #include "AquaPortRsc.h"
 
+#define sysVersion10	sysMakeROMVersion(1,0,0,sysROMStageRelease,0)
+#define sysVersion35	sysMakeROMVersion(3,5,0,sysROMStageRelease,0)
+
 /***********************************************************************
  *   Global Defines/Macros
  **********************************************************************/
 // Uncomment to generate test data by pressing 'D/L'
-///#define DUMMY_DOWNLOAD
-
+#define DUMMY_DOWNLOAD
 
 #define HI(x)    ((x >> 4) & 0x0f)
 #define LO(x)    (x & 0x0f)
 
-#define METRIC_FLAG       (unsigned char) 0xAD
-#define IMPERIAL_FLAG     (unsigned char) 0xA6
-#define MORE_DATA_FLAG    (unsigned char) 0xEF
-#define NO_DATA_FLAG      (unsigned char) 0xFF
+#define METRIC_FLAG       (UInt8) 0xAD
+#define IMPERIAL_FLAG     (UInt8) 0xA6
+#define MORE_DATA_FLAG    (UInt8) 0xEF
+#define NO_DATA_FLAG      (UInt8) 0xFF
 
 // YYYYMMDDHHmm\0 
 #define  NATO_DATE_SIZE   15
@@ -59,7 +54,7 @@
 #define appFileCreator             'SGAP'
 #define appDBVersionNum            0x01
 #define appPrefID                  0x00
-#define appPrefVersionNum          0x01
+#define appPrefVersionNum          0x02
 #define appDBName                  "AquaPortDB"
 #define appDBType                  'DATA'
 
@@ -76,11 +71,11 @@ typedef enum
 
 typedef enum 
 { 
-  text_view=0,
-  graph_view=1,
-  raw_view=2,
-  // add new views above & keep numbers correct
-  max_view=3 // not a real view!
+  text_view,
+  graph_view,
+  raw_view,
+  // add new views above
+  max_view // not a real view!
 } viewType;
  
 typedef enum 
@@ -98,20 +93,28 @@ typedef enum
   plot_point
 } plotStyleType;
 
+// option flags
+#define SHOWTEMP	1
+#define SHOWMINS	2
+#define SHOWALRM	4
+#define TBD4		8
+#define TBD5		16
+#define TBD6		32
+#define TBD7		64
+#define TBD8		128
 typedef struct 
 {
     dateFormType  dateFormat;
     viewType      view;
     plotStyleType plotStyle;
-    short         showTemp;
-    short         showMins;
+    UInt8         flags;
 } PreferenceType;
 
 typedef struct 
 {
     char          key[NATO_DATE_SIZE]; //YYYYMMDDHHmmss<nul>
-    short         blocks : 16;
-    unsigned char data[MAX_DATA]; 
+    Int16         blocks;
+    UInt8         data[MAX_DATA]; 
 } LogRecType;
 
 typedef LogRecType* LogRecPtr;
@@ -124,7 +127,7 @@ typedef LogRecType* LogRecPtr;
 static PreferenceType gPrefs;
 
 // no. of records in DB
-static UInt           gRecCnt = 0;
+static Int16          gRecCnt = 0;
 
 // single instance of record, used & recycled
 static LogRecType     gRec;
@@ -136,7 +139,7 @@ static VoidHand       gStringArrayH = NULL;
 static char           gKeyString[NORM_DATE_SIZE * MAX_LOGS];
 
 // which form was the 'Options' form called from
-static Word           gOptionsCalledFrom;
+static UInt16         gOptionsCalledFrom;
 
 /***********************************************************************
  *   Internal Constants
@@ -149,10 +152,10 @@ const RectangleType   viewArea = {{01, 14}, {158, 120}};
 const RectangleType   plotArea = {{20, 20}, {120, 100}};
 
 // guess at number of bytes used for gRec.key & gRec.blocks
-const int             logRecSize = sizeof(LogRecType);
+const Int16           logRecSize = sizeof(LogRecType);
 
 // an empty pattern used to wipe the visualisation area
-const CustomPatternType pattern = {0x0000, 0x0000, 0x0000, 0x0000};
+const CustomPatternType pattern[8] = {0,0,0,0,0,0,0,0};
 
 // a dummy date used to initialise the separators in UK & US dates
 const char nullDate[NORM_DATE_SIZE] = {"xx/xx/YYYY HH:mm:ss"};
@@ -160,7 +163,12 @@ const char nullDate[NORM_DATE_SIZE] = {"xx/xx/YYYY HH:mm:ss"};
 // a dummy date used to initialise NATO dates
 const char nullNATODate[NATO_DATE_SIZE] = {"YYYYMMDDhhmmss"};
 
-const UInt DBAttr = dmModeReadWrite | dmModeShowSecret;
+const UInt16 DBAttr = dmModeReadWrite | dmModeShowSecret;
+
+const RGBColorType rgbBlue = {0, 0, 0, 255};
+const RGBColorType rgbRed = {0, 255, 0, 0};
+static IndexedColorType foreColorBlue;
+static IndexedColorType foreColorRed;
 
 /***********************************************************************
  *   Internal Functions
@@ -288,14 +296,15 @@ static CharPtr DateUnformat(CharPtr fdate)
 static void BuildKeyString(void)
 {
     DmOpenRef    DB;
-    UInt         recNo, strEnd, i;
+    Int16        strEnd, i;
+    UInt16       recNo;
     LogRecPtr    recP;
     CharPtr      fdateP;
     
     DB = DmOpenDatabaseByTypeCreator(appDBType, 
                                      appFileCreator, 
                                      DBAttr);
-    gRecCnt = DmNumRecords(DB);  
+    gRecCnt = (Int16) DmNumRecords(DB);  
     gKeyString[0] = 0; // null string  
     for (recNo = 0, strEnd = 0; (recNo < gRecCnt) && (recNo < MAX_LOGS); recNo++) 
     {
@@ -322,43 +331,48 @@ static void BuildKeyString(void)
  *
  * FUNCTION:    RomVersionCompatible
  *
- * DESCRIPTION: This routine checks that ROM version is at least 3.1
+ * DESCRIPTION: This routine checks that a ROM version is meet your
+ *              minimum requirement.
  *
- * PARAMETERS:  - launchFlags     - flags that indicate if the UI is
- *                                  initialized.
+ * PARAMETERS:  requiredVersion - minimum rom version required
+ *                                (see sysFtrNumROMVersion in SystemMgr.h 
+ *                                for format)
+ *              launchFlags     - flags that indicate if the application 
+ *                                UI is initialized.
  *
- * RETURNED:    error code or zero if ROM is compatible
+ * RETURNED:    error code or zero if rom is compatible
  *
- **********************************************************************/
-static Err RomVersionCompatible(Word launchFlags)
+ * REVISION HISTORY:
+ *
+ *
+ ***********************************************************************/
+static Err RomVersionCompatible(UInt32 requiredVersion, UInt16 launchFlags)
 {
-    DWord romVersionCoded;
-    unsigned int romVersion;
-    
-    FtrGet(sysFtrCreator, sysFtrNumROMVersion, &romVersionCoded);
-    romVersion = (sysGetROMVerMajor(romVersionCoded) * 10) + 
-                     sysGetROMVerMinor(romVersionCoded);
-    if (romVersion < 31) 
-    {
-        if ((launchFlags & 
-             (sysAppLaunchFlagNewGlobals | sysAppLaunchFlagUIApp)) ==
-            (sysAppLaunchFlagNewGlobals | sysAppLaunchFlagUIApp)) 
-        {
-            FrmAlert(ROMIncompatibleAlert);
-            
-            // Pilot 1.0 will continuously relaunch this app unless we 
-            // switch to another safe one.
-            if (romVersion < 20) 
-            {
-                AppLaunchWithCommand(sysFileCDefaultApp, 
-                                     sysAppLaunchCmdNormalLaunch, 
-                                     NULL);
-            }
-        }
-        return sysErrRomIncompatible;
-    }
-    return 0;
+	UInt32 romVersion;
+
+	// See if we're on in minimum required version of the ROM or later.
+	FtrGet(sysFtrCreator, sysFtrNumROMVersion, &romVersion);
+	if (romVersion < requiredVersion)
+		{
+		if ((launchFlags & (sysAppLaunchFlagNewGlobals | sysAppLaunchFlagUIApp)) ==
+			(sysAppLaunchFlagNewGlobals | sysAppLaunchFlagUIApp))
+			{
+			FrmAlert (ROMIncompatibleAlert);
+		
+			// Palm OS 1.0 will continuously relaunch this app unless we switch to 
+			// another safe one.
+			if (romVersion < sysVersion10)
+				{
+				AppLaunchWithCommand(sysFileCDefaultApp, sysAppLaunchCmdNormalLaunch, NULL);
+				}
+			}
+		
+		return sysErrRomIncompatible;
+		}
+
+	return errNone;
 }
+
 
 /***********************************************************************
  *
@@ -400,8 +414,8 @@ static void AppHandleSync(void)
 static void DeleteLog(CharPtr ListKey)
 {
     DmOpenRef DB;
-    Word      buttonHit;
-    UInt      recNo;
+    UInt16    buttonHit;
+    UInt16    recNo;
     
     StrCopy(gRec.key, DateUnformat(ListKey));
 
@@ -444,7 +458,7 @@ static void DeleteLog(CharPtr ListKey)
  * RETURNED:    Formatted value placed in String Pointer
  *
  **********************************************************************/
-static void putform(CharPtr str, int d1, int d2, int d3, unitsType units)
+static void putform(CharPtr str, Int16 d1, Int16 d2, Int16 d3, unitsType units)
 {
     switch (units)
     {
@@ -489,7 +503,7 @@ static void drawText(FormPtr frm)
     FrmHideObject(frm, FrmGetObjectIndex(frm, ViewScrollLButton));
     FrmHideObject(frm, FrmGetObjectIndex(frm, ViewScrollRButton));
     
-    WinSetPattern((unsigned short *) &pattern);
+    WinSetPattern(pattern);
     WinFillRectangle((RectangleType *) &viewArea, 0);
     
     StrPrintF(dateStr, "%d%d%d%d%d%d%d%d",
@@ -584,15 +598,16 @@ static void drawText(FormPtr frm)
  * RETURNED:    -
  *
  **********************************************************************/
-static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
+static void drawDepthGraph(Int16 mins_offset, FormPtr frm, Int16 dive_time)
 {
-    int   i, j, tmp;
-    float currD1, currD2;
-    char  tStr[20];
+    Int16    i, j, tmp, excess, last = 0;
+    Int16    currD1, currD2;
+    char     tStr[20];
+    IndexedColorType oldColor;
     
-    int   offset = (mins_offset * 18);
+    Int16   offset = (mins_offset * 18);
 
-    int   maxD = (HI(gRec.data[18]) * 100) + 
+    Int16   maxD = (HI(gRec.data[18]) * 100) + 
                  (LO(gRec.data[18]) * 10) + 
                  HI(gRec.data[19]);
     
@@ -603,6 +618,7 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
         StrPrintF(tStr, "%03d", maxD);
         WinDrawChars(tStr, StrLen(tStr), 1, 115);
     	WinDrawChars("000", 4, 1, 12);
+    	excess = (100 * 5)/maxD; // 5 ft per 5 sec
     }
     else
     {
@@ -610,6 +626,7 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
         StrPrintF(tStr, "%02d.%d", maxD/10, maxD%10);
         WinDrawChars(tStr, StrLen(tStr), 1, 115);
     	WinDrawChars("00.0", 4, 1, 12);
+    	excess = (100 * 15)/maxD; // 1.5 m per 5 sec
     }
     WinDrawLine(4, 40, 14, 40);
     
@@ -619,14 +636,15 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
     
     // Scale marks on 'y' axis at 10ft or 5m
     for (i = 0; i <= maxD; i += (gRec.data[4] == IMPERIAL_FLAG)?10:50)
-        WinDrawLine( 18, 20 + (100 * i/maxD), 19, 20 + (100 * i/maxD));
-
+        WinDrawLine( 18, 20 + ((100 * i)/maxD), 19, 20 + ((100 * i)/maxD));
+    
+    // set old color at safe spot
+    oldColor = WinSetForeColor(foreColorRed);
+    WinSetForeColor(oldColor);
     
     // Depth Profile (as % of max depth)
     for (i = 0, j = 0; i < 120; i += 2, j += 3)
-    {   
-    	int last = 0;
-    	 	
+    {      	 	
         if ((gRec.data[offset+32+j] == NO_DATA_FLAG) ||
             (gRec.data[offset+32+j] == MORE_DATA_FLAG))
             break;
@@ -635,7 +653,15 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
                  (LO(gRec.data[offset+32+j]) * 10) +
                  HI(gRec.data[offset+33+j]);
     
-        tmp = 20 + (int)(100 * currD1/maxD);
+        tmp = 20 + ((100 * currD1)/maxD);
+               
+        if ((last - tmp > excess) && (gPrefs.flags & SHOWALRM))
+        {
+        	WinSetForeColor(foreColorRed);
+        	WinDrawLine(21 + i - 1, tmp - 5, 21 + i + 1, tmp - 5);
+        	WinDrawLine(21 + i - 1, tmp - 5, 21 + i, tmp - 4);
+        	WinDrawLine(21 + i, tmp - 4, 21 + i + 1, tmp - 5);
+        }
         
         switch(gPrefs.plotStyle)
         {
@@ -650,6 +676,7 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
 			    WinDrawLine(21 + i, tmp, 21 + i, tmp);
 		}
 	    last = tmp;
+	    WinSetForeColor(oldColor);    
 	         
         if ((gRec.data[offset+34+j] == NO_DATA_FLAG) ||
             (gRec.data[offset+34+j] == MORE_DATA_FLAG))
@@ -659,7 +686,16 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
                  (HI(gRec.data[offset+34+j]) * 10) +
                  LO(gRec.data[offset+34+j]);
         
-        tmp = 20 + (int)(100 * currD2/maxD);
+        tmp = 20 + ((100 * currD2)/maxD);
+
+        if ((last - tmp > excess) && (gPrefs.flags & SHOWALRM))
+        {
+        	WinSetForeColor(foreColorRed);
+        	WinDrawLine(22 + i - 1, tmp - 5, 22 + i + 1, tmp - 5);
+        	WinDrawLine(22 + i - 1, tmp - 5, 22 + i, tmp - 4);
+        	WinDrawLine(22 + i, tmp - 4, 22 + i + 1, tmp - 5);
+        }
+
         switch(gPrefs.plotStyle)
         {
         	case plot_line:
@@ -670,8 +706,9 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
 	    	    WinDrawLine(22 + i, tmp, 22 + i, tmp);
 	    }
         last = tmp;
+        WinSetForeColor(oldColor);    
     }
-    
+    WinSetForeColor(oldColor);
 }
 
 
@@ -687,16 +724,16 @@ static void drawDepthGraph(int mins_offset, FormPtr frm, int dive_time)
  * RETURNED:    -
  *
  **********************************************************************/
-static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
+static void drawTempGraph(Int16 mins_offset, FormPtr frm, Int16 tempStart)
 {
-	static int   datum[200];
-	char  tStr[20];
-    int   min_mark, max_mark, mark_interval;
-    int   min_temp, max_temp;
-    int   i, j;
-    int   sample_cnt, scaled;
-    float range, scale;
-	       
+	static Int16   datum[200];
+	char     tStr[20];
+    Int16    min_mark, max_mark, mark_interval;
+    Int16    min_temp, max_temp, sample_cnt, scaled;
+    Int16    i, j;
+    Int16    range, scale;
+    IndexedColorType oldColor;
+    	       
     if (gRec.data[tempStart - 1] == NO_DATA_FLAG)
     	return; // we have no temp info, so what else can we do?
     		
@@ -743,7 +780,6 @@ static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
         	min_temp = datum[i];
 
         i++;
-
     }
     sample_cnt = i;
     
@@ -757,17 +793,7 @@ static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
     	// Metric 5 degree intervals
 		mark_interval = 50;
     }
-    
-    /*
-    StrPrintF(tStr, 
- 	          "%d -> %d : %d",
-	          min_temp,
-    	      max_temp,
-        	  tempStart);
-        	  
-  	FrmCustomAlert(DebugAlert, "Info.", tStr, NULL);
-  	*/
-  	
+     	
 	min_mark = ((min_temp - 1) / mark_interval) * mark_interval;
 	max_mark = ((max_temp / mark_interval) + 1) * mark_interval;
 
@@ -793,34 +819,28 @@ static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
         StrPrintF(tStr, "%02d", min_mark/10);
         WinDrawChars(tStr, 2, 145, 115);
     }
-    WinDrawGrayLine(145, 40, 155, 40);
 
-    range = (float) max_mark - (float) min_mark;
-    scale = (100.0F / range);
+    range = max_mark - min_mark;
+    scale = (100 / range);
     
     for (i = min_mark; i <= max_mark; i += mark_interval)
     {
-        j = 120 - (int) (((float) i - (float) min_mark) * scale);
+        j = 120 - ((i - min_mark) * scale);
         WinDrawLine( 140, j, 142, j);
     } 
-    
-    /*
-    StrPrintF(tStr, 
- 	          "%d -> %d : %d",
-	          min_mark,
-    	      max_mark,
-        	  mark_interval);
-  	FrmCustomAlert(DebugAlert, "Scale", tStr, NULL);	                	          
-  	*/
-    
+
+	oldColor = WinSetForeColor(foreColorBlue);
+    WinDrawLine(145, 40, 155, 40);
+       
     for (i = (mins_offset / 5), j = 0; 
          (j < sample_cnt) && (j < 10); 
          j+=5, i++)
     {
-        scaled = 120 - (int) (((float) datum[i] - (float) min_mark) * scale);
+        scaled = 120 - ((datum[i] - min_mark) * scale);
                             
     	if ((scaled <= 120) && (scaled >= 20))
-        	WinDrawGrayLine(21 + (j * 12), scaled, 79 + (j * 12), scaled);
+        	WinDrawLine(21 + (j * 12), scaled, 79 + (j * 12), scaled);
+#ifdef DEBUG_TEMP
         else
         {
         	StrPrintF(tStr, 
@@ -830,7 +850,9 @@ static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
        	        	  scaled);
         	FrmCustomAlert(DebugAlert, "Bad Temp", tStr, NULL);	                	          
         }    
-    }
+#endif
+	}
+    WinSetForeColor(oldColor);
 }
 
 /***********************************************************************
@@ -845,12 +867,12 @@ static void drawTempGraph(int mins_offset, FormPtr frm, int tempStart)
  * RETURNED:    -
  *
  **********************************************************************/
-static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
+static void drawGraph(Int16 mins_offset, FormPtr frm, Int16 dive_time)
 {
-    int   tempStart;
+    Int16   tempStart;
                         
     // set up form
-    WinSetPattern((unsigned short *) pattern);
+    WinSetPattern(pattern);
     WinFillRectangle((RectangleType *) &viewArea, 0);
     
     FrmShowObject(frm, FrmGetObjectIndex(frm, ViewScrollLButton));
@@ -863,7 +885,7 @@ static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
     }
    
     // set tempStart to index 1st temp sample in data
-   	if (gPrefs.showTemp)
+   	if (gPrefs.flags & SHOWTEMP)
    	{
         tempStart = BLOCK_SIZE + (dive_time * 18) - 5; // 18 == 1/2 * 12
                             // dive time is ceil(dive mins), so we start
@@ -888,7 +910,7 @@ static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
     WinDrawRectangleFrame(simpleFrame, (RectangleType *) &plotArea);
     
     // Grey minute divisions
-    if (gPrefs.showMins)
+    if (gPrefs.flags & SHOWMINS)
     {
 	    WinDrawGrayLine( 32, 21,  32, 119);
 	    WinDrawGrayLine( 44, 21,  44, 119);
@@ -912,7 +934,7 @@ static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
     WinDrawLine(116, 121, 116, 119);
     WinDrawLine(128, 121, 128, 119);
 
-	if ((tempStart < (gRec.blocks * BLOCK_SIZE)) && gPrefs.showTemp)
+	if ((tempStart < (gRec.blocks * BLOCK_SIZE)) && (gPrefs.flags & SHOWTEMP))
 		drawTempGraph(mins_offset, frm, tempStart);
 		
 	drawDepthGraph(mins_offset, frm, dive_time);
@@ -930,16 +952,16 @@ static void drawGraph(int mins_offset, FormPtr frm, int dive_time)
  * RETURNED:    -
  *
  **********************************************************************/
-static void drawRaw(int block, FormPtr frm)
+static void drawRaw(Int16 block, FormPtr frm)
 {
 	char longHex[9];
 	char shortHex[3];
 	char head[28];
-	int i, j, k;
+	Int16 i, j, k;
 	//fontID font;
                         
     // set up form
-    WinSetPattern((unsigned short *) pattern);
+    WinSetPattern(pattern);
     WinFillRectangle((RectangleType *) &viewArea, 0);
     
     FrmShowObject(frm, FrmGetObjectIndex(frm, ViewScrollLButton));
@@ -995,18 +1017,18 @@ static void drawRaw(int block, FormPtr frm)
 static Err AddRecord(void)
 {
     DmOpenRef DB;
-    int       err;
+    Err       err;
     Boolean   dup = false;
     UShort    recNo;
     Handle    recHand;
-    UInt      recIdx = 0;
+    UInt16     recIdx = 0;
     LogRecPtr recP2;
         
     DB = DmOpenDatabaseByTypeCreator(appDBType, 
                                      appFileCreator, 
                                      DBAttr);
     if (!DB)
-        return -1;
+        return (Err) -1;
         
     recNo = DmFindSortPosition(DB, &gRec, 0, 
                                    (DmComparF *) CompareDates, 0);
@@ -1063,7 +1085,7 @@ static Err AddRecord(void)
  **********************************************************************/
 static void GetDummyLog(void)
 {
-    ULong           now;
+    UInt32          now;
     DateTimeType    dt;
     DateTimePtr     dtPtr = &dt;
 
@@ -1087,20 +1109,20 @@ static void GetDummyLog(void)
     //              x   1   2   3   4   5   6   7   8   9   x   1 
                 "\x23\x16\x40\x07\xef\xef\xef\xef\xef\xef\xef\xef");
 
-    gRec.data[5] = (char) (dtPtr->year / 1000) << 4;
-    gRec.data[5] |= ((dtPtr->year % 1000) / 100);
-    gRec.data[6] = (char) ((dtPtr->year % 100) / 10) << 4;
-    gRec.data[6] |= (dtPtr->year % 10);
-    gRec.data[7] = (char) (dtPtr->month / 10) << 4;
-    gRec.data[7] |= (dtPtr->month % 10);
-    gRec.data[8] = (char) (dtPtr->day / 10) << 4;
-    gRec.data[8] |= (dtPtr->day % 10);
-    gRec.data[10] = (char) (dtPtr->hour / 10) << 4;
-    gRec.data[10] |= (char) (dtPtr->hour % 10);
-    gRec.data[11] = (dtPtr->minute / 10) << 4;
-    gRec.data[11] |= (char) (dtPtr->minute % 10);
-    gRec.data[12] = (dtPtr->second / 10) << 4;
-    gRec.data[12] |= (char) (dtPtr->second % 10);
+    gRec.data[5] =  (UInt8) ((dtPtr->year / 1000) << 4);
+    gRec.data[5] |= (UInt8) ((dtPtr->year % 1000) / 100);
+    gRec.data[6] =  (UInt8) (((dtPtr->year % 100) / 10) << 4);
+    gRec.data[6] |= (UInt8) (dtPtr->year % 10);
+    gRec.data[7] =  (UInt8) ((dtPtr->month / 10) << 4);
+    gRec.data[7] |= (UInt8) (dtPtr->month % 10);
+    gRec.data[8] =  (UInt8) ((dtPtr->day / 10) << 4);
+    gRec.data[8] |= (UInt8) (dtPtr->day % 10);
+    gRec.data[10] = (UInt8) ((dtPtr->hour / 10) << 4);
+    gRec.data[10] |=(UInt8) (dtPtr->hour % 10);
+    gRec.data[11] = (UInt8) ((dtPtr->minute / 10) << 4);
+    gRec.data[11] |=(UInt8) (dtPtr->minute % 10);
+    gRec.data[12] = (UInt8) ((dtPtr->second / 10) << 4);
+    gRec.data[12] |=(UInt8) (dtPtr->second % 10);
     gRec.blocks++; //1
     
     gRec.data[32]=0x18;
@@ -1205,7 +1227,7 @@ static void GetDummyLog(void)
     gRec.data[127]=0x58;
     gRec.blocks++; //4
     
-    gRec.data[128]=0x18;
+    gRec.data[128]=0x10;
     gRec.data[129]=0x01;
     gRec.data[130]=0x81;
     gRec.data[131]=0x17;
@@ -1286,7 +1308,7 @@ static void GetDummyLog(void)
  **********************************************************************/
 static void fixLog()
 {
-	int j, curr, next, ave, last = 0;
+	Int16 j, curr, next, ave, last = 0;
 	
     for (j = 0; ;j += 3)
     {   
@@ -1307,14 +1329,15 @@ static void fixLog()
         	// just in case last sample!
         	if ((gRec.data[34+j] == NO_DATA_FLAG) ||
             	(gRec.data[34+j] == MORE_DATA_FLAG))
-            	next = last;
+            	ave = next = last;
             else
+            {
 	        	next = (LO(gRec.data[33+j]) * 100) +
                		   (HI(gRec.data[34+j]) * 10) +
                 	   LO(gRec.data[34+j]);
-                   
-            //ave = (int) (((float) (last + next) / 2.0F) + 0.5F);
-            ave = (last + next) / 2;
+
+            	ave = (last + next) / 2;
+            }
             
             gRec.data[32+j] = (unsigned char) 
             					(((ave / 100) << 4) | ((ave % 100) / 10));
@@ -1337,14 +1360,15 @@ static void fixLog()
         	// just in case last sample!
         	if ((gRec.data[35+j] == NO_DATA_FLAG) ||
             	(gRec.data[35+j] == MORE_DATA_FLAG))
-            	next = last;
-            else            
+            	ave = next = last;
+            else      
+            {      
 	        	next = (HI(gRec.data[35+j]) * 100) +
     	        	   (LO(gRec.data[35+j]) * 10) +
         	    	   HI(gRec.data[36+j]);
                
-            //ave = (int) (((float) (last + next) / 2.0F) + 0.5F);
-            ave = (last + next) / 2;
+            	ave = (last + next) / 2;
+            }
                
             gRec.data[33+j] = (unsigned char) 
             					((HI(gRec.data[33+j]) << 4) | (ave / 100));
@@ -1369,11 +1393,11 @@ static void fixLog()
 static void GetLog(void)
 {
     SerSettingsType serialSettings;
-    UInt            serialPort;
-    ULong           got; 
+    UInt16          serialPort;
+    UInt32          got; 
     Err             err;
     static Byte     ack[1] = { 0xFF };
-    DWord           value;
+    UInt32          value;
     Byte            holding[BLOCK_SIZE];
 
 #ifdef DUMMY_DOWNLOAD
@@ -1585,18 +1609,23 @@ static void GetLog(void)
  **********************************************************************/
 static Boolean OptionsFormHandleEvent(EventPtr eventP)
 {
-    Boolean      handled = false;
-    FormPtr      frmP = FrmGetActiveForm();
-    static Word  dateGrpId;
-    static Word  plotGrpId;
-    ControlPtr   chkTemp = 
+    Boolean        handled = false;
+    FormPtr        frmP = FrmGetActiveForm();
+    static UInt16  dateGrpId;
+    static UInt16  plotGrpId;
+    ControlPtr     chkTemp = 
                      FrmGetObjectPtr(frmP, 
                                      FrmGetObjectIndex(frmP, 
                                          OptionsTempCheckbox));
-    ControlPtr   chkMins = 
+    ControlPtr     chkMins = 
                      FrmGetObjectPtr(frmP, 
                                      FrmGetObjectIndex(frmP, 
                                          OptionsMinsCheckbox));
+                                         
+    ControlPtr     chkAlrm = 
+                     FrmGetObjectPtr(frmP, 
+                                     FrmGetObjectIndex(frmP, 
+                                         OptionsAlrmCheckbox));
         
     switch (eventP->eType) 
     {
@@ -1634,8 +1663,17 @@ static Boolean OptionsFormHandleEvent(EventPtr eventP)
                             gPrefs.plotStyle = plot_point;
                             break;
                     }
-                    gPrefs.showTemp = CtlGetValue(chkTemp);
-                    gPrefs.showMins = CtlGetValue(chkMins);
+                    gPrefs.flags = 0;
+                    if (CtlGetValue(chkTemp))
+                    	gPrefs.flags |= SHOWTEMP;
+
+                    	
+                    if (CtlGetValue(chkMins))
+                    	gPrefs.flags |= SHOWMINS;
+                    	
+                    if (CtlGetValue(chkAlrm))
+                    	gPrefs.flags |= SHOWALRM;
+                    	
                     FrmGotoForm(gOptionsCalledFrom);
                     handled = true;
                     break;
@@ -1678,8 +1716,9 @@ static Boolean OptionsFormHandleEvent(EventPtr eventP)
             FrmSetControlGroupSelection (frmP, 
                                          OptionsFormGroupID3, 
                                          plotGrpId);
-            CtlSetValue(chkTemp, gPrefs.showTemp);
-            CtlSetValue(chkMins, gPrefs.showMins);
+            CtlSetValue(chkTemp, gPrefs.flags & SHOWTEMP);
+            CtlSetValue(chkMins, gPrefs.flags & SHOWMINS);
+            CtlSetValue(chkAlrm, gPrefs.flags & SHOWALRM);
             FrmDrawForm(frmP);
             handled = true;
             break;
@@ -1703,7 +1742,7 @@ static Boolean OptionsFormHandleEvent(EventPtr eventP)
  **********************************************************************/
 static Boolean ShowAbout(void)
 {
-    Word        buttonHit;
+    UInt16      buttonHit;
     Handle      verH, namH;
     CharPtr     ver, nam;
        
@@ -1730,7 +1769,7 @@ static Boolean ShowAbout(void)
  * RETURNED:    
  *
  **********************************************************************/
-static void SetUpList(ListPtr *listP, FormPtr *frmP, CharPtr *keyP, Word *selection)
+static void SetUpList(ListPtr *listP, FormPtr *frmP, CharPtr *keyP, Int16 *selection)
 {
 
     if (gStringArrayH)
@@ -1744,10 +1783,10 @@ static void SetUpList(ListPtr *listP, FormPtr *frmP, CharPtr *keyP, Word *select
     {    
         gStringArrayH = 
             SysFormPointerArrayToStrings(gKeyString, 
-                                         (short) gRecCnt);
+                                         (Int16) gRecCnt);
         LstSetListChoices(*listP, 
                             MemHandleLock(gStringArrayH), 
-                            gRecCnt);
+                            (Int16) gRecCnt);
                             
         LstSetSelection(*listP, *selection);
         *keyP = LstGetSelectionText(*listP, *selection);
@@ -1758,8 +1797,8 @@ static void SetUpList(ListPtr *listP, FormPtr *frmP, CharPtr *keyP, Word *select
         LstSetListChoices(*listP, 
                             NULL, 
                             gRecCnt);
-        LstSetSelection(*listP, (UShort) -1);
-        *selection = (UShort) -1;
+        LstSetSelection(*listP, (Int16) -1);
+        *selection = (Int16) -1;
         *keyP = NULL;
     }
 }
@@ -1780,7 +1819,7 @@ static Boolean MainFormHandleEvent(EventPtr eventP)
 {
     Boolean        handled = false;
     FormPtr        frmP = FrmGetActiveForm();
-    static Word    selection = (UShort) -1;
+    static Int16   selection = (Int16) -1;
     static ListPtr listP;
     static CharPtr keyP = NULL;
 
@@ -1869,9 +1908,9 @@ static Boolean MainFormHandleEvent(EventPtr eventP)
                if (eventP->data.keyDown.chr == pageUpChr ||
                    eventP->data.keyDown.chr == pageDownChr)
                {
-                   enum directions d = 
+                   WinDirectionType d = 
                        (eventP->data.keyDown.chr == pageUpChr) ? 
-                           up : down;
+                           winUp : winDown;
                    LstScrollList(listP, d, 1);
                }
                handled = true;
@@ -1900,7 +1939,7 @@ static Boolean MainFormHandleEvent(EventPtr eventP)
  * RETURNED:    -
  *
  **********************************************************************/
-static void drawView(int offset, FormPtr frmP, int diveTime, int block)
+static void drawView(Int16 offset, FormPtr frmP, Int16 diveTime, Int16 block)
 {
     switch (gPrefs.view)
     {
@@ -1935,16 +1974,16 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
 {
     Boolean        handled = false;
     FormPtr        frmP  = FrmGetActiveForm();
-    static Word    selection;
+    static UInt16  selection;
     static CharPtr keyP = NULL;
-    static int     offset = 0;
-    static int     block = 0;
+    static Int16   offset = 0;
+    static Int16   block = 0;
     LogRecPtr      recP;
     Handle         recHand;
     DmOpenRef      DB;
-    int            i;
-    UInt           recNo;
-    static int     diveTime = 0;
+    Int16          i;
+    UInt16         recNo;
+    static Int16   diveTime = 0;
                    
     switch (eventP->eType) 
     {
@@ -1953,7 +1992,7 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
             {
                 case ViewViewButtonToggleButton :
                     gPrefs.view = (viewType) 
-                                      (((int) gPrefs.view + 1) % 
+                                      (((Int16) gPrefs.view + 1) % 
                                           max_view);
                     drawView(offset, frmP, diveTime, block);
                     handled = true;
@@ -2078,7 +2117,7 @@ static Boolean ViewFormHandleEvent(EventPtr eventP)
  **********************************************************************/
 static Boolean AppHandleEvent(EventPtr eventP)
 {
-    Word formId;
+    UInt16  formId;
     FormPtr frmP;
 
     if (eventP->eType == frmLoadEvent) 
@@ -2124,7 +2163,7 @@ static Boolean AppHandleEvent(EventPtr eventP)
  **********************************************************************/
 static void AppEventLoop(void)
 {
-    Word error;
+    Err       error;
     EventType event;
 
     do 
@@ -2154,21 +2193,10 @@ static Err AppStart(void)
 {
     DmOpenRef         DB;
     Err               error = 0;
-    Word              prefsSize = sizeof(PreferenceType);
-    UInt              dbCard, dbHdrAttrs, dbVersion = appDBVersionNum;
+    UInt16            prefsSize = sizeof(PreferenceType);
+    UInt16            dbCard, dbHdrAttrs, dbVersion = appDBVersionNum;
     LocalID           local;
     
-    DWord      		  depth, depthSupp, height, width;
-    Boolean           color;
-    
-    ScrDisplayMode (scrDisplayModeGet, &width, &height, &depth, &color);
-    ScrDisplayMode (scrDisplayModeGetSupportedDepths, &width, &height, &depthSupp, &color);
-    if ((depthSupp > depth) && (depth < 2) && (depthSupp & 2))
-    {
-    	depth = 2;
-	    ScrDisplayMode (scrDisplayModeSet, &width, &height, &depth, &color);
-	}
-
     // Find the application's data file.  If it doesn't exist create it.
     DB = DmOpenDatabaseByTypeCreator(appDBType, 
                                      appFileCreator, 
@@ -2222,7 +2250,7 @@ static Err AppStart(void)
     }
     else
     {
-        gRecCnt = DmNumRecords(DB);
+        gRecCnt = (Int16) DmNumRecords(DB);
     }
     DmCloseDatabase(DB);
     
@@ -2236,18 +2264,13 @@ static Err AppStart(void)
                               true) == noPreferenceFound) 
     {
         gPrefs.dateFormat = US;
-        gPrefs.view = text_view;
-        gPrefs.plotStyle = plot_point;
-        gPrefs.showTemp = 1;
-        gPrefs.showMins = 1;
+        gPrefs.view = graph_view;
+        gPrefs.plotStyle = plot_line;
+        gPrefs.flags = SHOWTEMP | SHOWMINS | SHOWALRM;
     }
     
-    //error = SysLibFind(MathLibName, &MathLibRef);
-    //if (error)
-    //    error = SysLibLoad(LibType, MathLibCreator, &MathLibRef);
-    //ErrFatalDisplayIf(error, "Can't find MathLib"); // Just an example; handle it gracefully
-    //error = MathLibOpen(MathLibRef, MathLibVersion);
-    //ErrFatalDisplayIf(error, "Can't open MathLib");   
+    foreColorBlue = WinRGBToIndex(&rgbBlue);
+    foreColorRed  = WinRGBToIndex(&rgbRed);
     
     return error;
 }
@@ -2265,10 +2288,8 @@ static Err AppStart(void)
  *
  **********************************************************************/
 static void AppStop(void)
-{
-    //UInt usecount;
-    //Err error;
-    
+{  
+
     // Write the saved preferences / saved-state information.  This data
     // will be backed up during a HotSync.
     PrefSetAppPreferences (appFileCreator, appPrefID, appPrefVersionNum,
@@ -2279,12 +2300,6 @@ static void AppStop(void)
         MemHandleUnlock(gStringArrayH);
     }
     
-    ScrDisplayMode (scrDisplayModeSetToDefaults, NULL, NULL, NULL, NULL);
-    
-    //error = MathLibClose(MathLibRef, &usecount);
-    //ErrFatalDisplayIf(error, "Can't close MathLib");
-    //if (usecount == 0)
-    //    SysLibRemove(MathLibRef); 
 }
 
 /***********************************************************************
@@ -2301,11 +2316,11 @@ static void AppStop(void)
  * RETURNED:    Result of launch
  *
  **********************************************************************/
-static DWord SGAP_PilotMain(Word cmd, Ptr cmdPBP, Word launchFlags)
+static UInt32 SGAP_PilotMain(UInt16 cmd, Ptr cmdPBP, UInt16 launchFlags)
 {
     Err error;
 
-    error = RomVersionCompatible(launchFlags);
+    error = RomVersionCompatible(sysVersion35, launchFlags); // need 3.5 or better
     if (error) 
         return error;
 
@@ -2370,7 +2385,7 @@ static DWord SGAP_PilotMain(Word cmd, Ptr cmdPBP, Word launchFlags)
  * RETURNED:    Result of launch
  *
  **********************************************************************/
-DWord PilotMain(Word cmd, Ptr cmdPBP, Word launchFlags)
+UInt32 PilotMain(UInt16 cmd, Ptr cmdPBP, UInt16 launchFlags)
 {
     return SGAP_PilotMain(cmd, cmdPBP, launchFlags);
 }
